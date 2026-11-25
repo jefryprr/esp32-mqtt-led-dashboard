@@ -32,7 +32,13 @@ Default `TOPIC_BASE = "kelas-08A/05"` dan harus sama di dashboard.
 | `<base>/led/27/status` | ESP -> web | `0` / `1` | ya |
 | `<base>/esp32/status` | ESP -> web | `online` / `offline` | ya + LWT |
 | `<base>/esp32/info` | ESP -> web | JSON: ip, rssi, heap, uptime, fw | ya |
-| `<base>/esp32/heartbeat` | ESP -> web | JSON: uptime, rssi, heap | tidak |
+| `<base>/esp32/heartbeat` | ESP -> web | JSON: uptime, rssi, heap, s26, s27 | tidak |
+| `<base>/esp32/get` | web -> ESP | `1` | tidak |
+
+Retained message di broker publik bersifat **best-effort**. Dashboard tidak
+bergantung padanya: setelah terhubung, dashboard mengirim `esp32/get` dan
+firmware langsung membalas snapshot. Heartbeat juga membawa state LED, jadi
+tampilan tetap sinkron meskipun broker tidak menyimpan retained message.
 
 NeoPixel onboard: kanal 26 saja = biru, kanal 27 saja = merah, keduanya = hijau.
 
@@ -91,13 +97,16 @@ Semua aset web memakai path relatif, jadi tetap bekerja di subpath GitHub Pages.
 
 ## Perilaku penting
 
-- **Retained command**: perintah terakhir disimpan broker. ESP32 yang baru boot
-  langsung mengikuti perintah tersebut.
-- **State di NVS**: kondisi LED tersimpan di flash ESP32, jadi tetap benar setelah
-  reboot meskipun retained message broker hilang.
-- **LWT + heartbeat**: `offline` dikirim broker saat koneksi putus; heartbeat tiap
-  15 detik membuat dashboard bisa menandai "tidak merespons" bila data berhenti
-  lebih dari 45 detik.
+- **Sinkronisasi status**: setelah terhubung, dashboard mengirim
+  `<base>/esp32/get`; firmware membalas status kedua kanal, info, dan heartbeat.
+  Heartbeat tiap 15 detik juga membawa state LED (`s26`, `s27`), jadi tampilan
+  tetap benar meskipun retained message tidak tersedia.
+- **Retained command (best-effort)**: perintah terakhir dapat disimpan broker
+  bila didukung. Firmware juga menyimpan state di NVS, sehingga kondisi LED
+  tetap benar setelah reboot tanpa bergantung pada retained message.
+- **State di NVS**: kondisi LED tersimpan di flash ESP32.
+- **LWT + heartbeat**: `offline` dikirim broker saat koneksi putus; dashboard
+  menandai "tidak merespons" bila heartbeat berhenti lebih dari 45 detik.
 - **Reconnect**: WiFi dicek tiap 10 detik, MQTT tiap 5 detik.
 
 ## Broker lokal (opsional)

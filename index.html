@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Dashboard kendali dua kanal LED ESP32-S3 lewat MQTT: status retained, heartbeat perangkat, dan log real-time.">
+  <meta name="description" content="Dashboard kendali dua kanal LED ESP32-S3 lewat MQTT: status real-time, heartbeat perangkat, dan log langsung.">
   <meta name="theme-color" content="#0c0c0b">
   <meta property="og:title" content="Kendali — ESP32-S3 MQTT">
   <meta property="og:description" content="Panel kendali dua kanal LED ESP32-S3 dengan status real-time, telemetry, dan log MQTT.">
@@ -631,7 +631,7 @@
           <div><dt>Broker</dt><dd>broker.emqx.io</dd></div>
           <div><dt>Web</dt><dd>WSS · 8084</dd></div>
           <div><dt>Device</dt><dd>TLS · 8883</dd></div>
-          <div><dt>State</dt><dd>Retained + NVS</dd></div>
+          <div><dt>State</dt><dd>NVS + live sync</dd></div>
         </dl>
       </section>
 
@@ -720,7 +720,7 @@
 
     <footer class="footer">
       <p>Kendali LED ESP32-S3 · Kelas 08A / 05</p>
-      <p>QoS 1 · Retained · TLS 1.2+</p>
+      <p>QoS 1 · Live sync · TLS 1.2+</p>
       <a href="https://github.com/jefryprr/esp32-mqtt-led-dashboard" target="_blank" rel="noopener">GitHub ↗</a>
     </footer>
   </div>
@@ -749,6 +749,7 @@
   let st = { "26": null, "27": null };
   let espOnline = null;
   let lastHeartbeat = 0;
+  let sesiMulai = 0;
   let deviceInfo = null;
   let pending = { "26": false, "27": false };
   const pendingTimer = { "26": 0, "27": 0 };
@@ -889,13 +890,18 @@
       else if (!tersambung) teks = "BROKER OFFLINE";
       else if (espOnline === null) teks = "MENUNGGU ESP32";
       else if (!espOnline) teks = "ESP32 OFFLINE";
+      else if (lastHeartbeat === 0) {
+        teks = Date.now() - sesiMulai > 5000 ? "TIDAK MERESPONS" : "MEMVERIFIKASI...";
+      }
       else if (basi) teks = "TIDAK MERESPONS";
       else if (nilai === null) teks = "MENUNGGU STATUS";
       else teks = nilai ? "MATIKAN" : "NYALAKAN";
 
+      const hbSiap = lastHeartbeat > 0 && !basi;
+
       tombol.textContent = teks;
       tombol.className = "btn" + (nilai ? " off" : "");
-      tombol.disabled = !(tersambung && espOnline === true && !basi &&
+      tombol.disabled = !(tersambung && espOnline === true && hbSiap &&
                           nilai !== null && !pending[pin]);
     }
   }
@@ -910,6 +916,13 @@
     } else if (!espOnline) {
       e.textContent = "ESP32: offline";
       e.className = "badge bad";
+    } else if (lastHeartbeat === 0) {
+      if (Date.now() - sesiMulai > 5000) {
+        e.textContent = "ESP32: tidak merespons";
+      } else {
+        e.textContent = "ESP32: memverifikasi...";
+      }
+      e.className = "badge wait";
     } else if (umur !== null && umur > BATAS_HEARTBEAT) {
       e.textContent = "ESP32: tidak merespons";
       e.className = "badge wait";
@@ -944,6 +957,7 @@
     st = { "26": null, "27": null };
     espOnline = null;
     lastHeartbeat = 0;
+    sesiMulai = 0;
     deviceInfo = null;
     for (const pin of PINS) selesaiPending(pin);
     refresh();
@@ -961,6 +975,20 @@
         const h = JSON.parse(teks);
         lastHeartbeat = Date.now();
         deviceInfo = Object.assign(deviceInfo || {}, h);
+
+        // Heartbeat hanya dikirim saat perangkat hidup.
+        if (!retained && espOnline !== true) espOnline = true;
+
+        // State LED ikut di heartbeat, jadi dashboard tetap sinkron
+        // meskipun broker tidak menyimpan retained message.
+        for (const pin of PINS) {
+          const v = h["s" + pin];
+          if (v === 0 || v === 1) {
+            st[pin] = v;
+            selesaiPending(pin);
+          }
+        }
+        refresh();
       } catch (e) {
         log("err", "Heartbeat bukan JSON valid: " + teks);
       }
@@ -1006,6 +1034,16 @@
     lama.end(true);
   }
 
+  function mintaStatus(s) {
+    const topik = s.base + "/esp32/get";
+    log("out", "KIRIM   " + topik + "  [minta status]");
+    s.client.publish(topik, "1", { qos: 1, retain: false }, (err) => {
+      if (err && session === s) {
+        log("err", "Gagal meminta status: " + (err.message || err));
+      }
+    });
+  }
+
   function connect() {
     let broker, base;
     try {
@@ -1048,6 +1086,7 @@
 
     client.on("connect", () => {
       if (session !== s) return;
+      sesiMulai = Date.now();
       setConn("Terhubung ke broker", "ok");
       log("sys", "Terhubung. Berlangganan status...");
 
@@ -1071,7 +1110,21 @@
         } else {
           log("sys", "Subscribe OK (" + topik.length + " topik)");
         }
+
+        // Broker publik belum tentu konsisten menyimpan retained message.
+        // Minta snapshot agar presence diverifikasi oleh heartbeat nyata.
+        setTimeout(() => {
+          if (session === s && client.connected) mintaStatus(s);
+        }, 900);
       });
+
+      setTimeout(() => {
+        if (session !== s || !client.connected) return;
+        if (espOnline !== null && lastHeartbeat > 0 &&
+            st["26"] !== null && st["27"] !== null) return;
+        log("sys", "Status belum lengkap; meminta ulang...");
+        mintaStatus(s);
+      }, 4000);
 
       refresh();
     });

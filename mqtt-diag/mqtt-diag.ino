@@ -14,11 +14,16 @@
  *    <base>/led/27/status       "0" / "1"   (retained)
  *    <base>/esp32/status        online/offline (retained + LWT)
  *    <base>/esp32/info          JSON, retained saat connect
- *    <base>/esp32/heartbeat     JSON, tiap 15 detik
+ *    <base>/esp32/heartbeat     JSON, tiap 15 detik + state LED
+ *    <base>/esp32/get           "1" dari web, minta snapshot status
+ *
+ *  Catatan: retained message di broker publik bersifat best-effort.
+ *  Dashboard tidak bergantung padanya: web mengirim "get" saat connect
+ *  dan heartbeat membawa state LED, jadi tampilan tetap sinkron.
  *
  *  Fitur:
  *    - State LED disimpan di NVS, tahan reboot/listrik mati.
- *    - Retained command: perintah terakhir langsung diterapkan saat boot.
+ *    - Retained command (bila didukung broker) langsung diterapkan saat boot.
  *    - LWT "offline" + heartbeat untuk indikator online di dashboard.
  *    - Reconnect WiFi/MQTT otomatis tanpa memblokir loop terus-menerus.
  *    - Diagnosis error TLS di Serial.
@@ -38,7 +43,7 @@
 #endif
 
 // ===== VERSI =====
-const char* FW_VERSION = "1.1.0";
+const char* FW_VERSION = "1.2.0";
 
 // ===== KREDENSIAL WIFI =====
 // Disimpan di secrets.h yang tidak ikut repository publik.
@@ -70,6 +75,7 @@ static const char* TOPIC_STATUS_27 = TOPIC_BASE "/led/27/status";
 static const char* TOPIC_STATUS    = TOPIC_BASE "/esp32/status";
 static const char* TOPIC_INFO      = TOPIC_BASE "/esp32/info";
 static const char* TOPIC_HEARTBEAT = TOPIC_BASE "/esp32/heartbeat";
+static const char* TOPIC_GET       = TOPIC_BASE "/esp32/get";
 
 // ===== ROOT CA EMQX =====
 // DigiCert Global Root G2 (diverifikasi 2026: *.emqx.io ->
@@ -204,16 +210,24 @@ void publishInfo() {
 }
 
 void publishHeartbeat() {
-  char buf[96];
+  char buf[128];
   snprintf(buf, sizeof(buf),
-           "{\"uptime\":%lu,\"rssi\":%d,\"heap\":%u}",
+           "{\"uptime\":%lu,\"rssi\":%d,\"heap\":%u,\"s26\":%d,\"s27\":%d}",
            millis() / 1000UL, (int)WiFi.RSSI(),
-           (unsigned)ESP.getFreeHeap());
+           (unsigned)ESP.getFreeHeap(), stateLed26, stateLed27);
 
   if (!client.publish(TOPIC_HEARTBEAT, buf, false)) {
     Serial.println("[PUBLISH] heartbeat GAGAL");
   }
   lastHeartbeat = millis();
+}
+
+// Snapshot lengkap: dipakai saat connect dan saat dashboard meminta "get".
+void publishSnapshot() {
+  publishStatus(26);
+  publishStatus(27);
+  publishInfo();
+  publishHeartbeat();
 }
 
 
@@ -245,6 +259,14 @@ void setLed(int kanal, int nilai) {
 //  CALLBACK MQTT
 // ============================================================
 void callback(char* topic, byte* payload, unsigned int length) {
+  // Permintaan snapshot dari dashboard; payload tidak divalidasi.
+  if (strcmp(topic, TOPIC_GET) == 0) {
+    Serial.println("[MQTT] Permintaan snapshot dari dashboard");
+    client.publish(TOPIC_STATUS, "online", true);
+    publishSnapshot();
+    return;
+  }
+
   if (length == 0 || length > 16) {
     Serial.printf("[MQTT] Payload tidak valid (panjang %u)\n", length);
     return;
@@ -313,9 +335,11 @@ void connectMQTT() {
 
   bool sub26 = client.subscribe(TOPIC_SET_26, 1);
   bool sub27 = client.subscribe(TOPIC_SET_27, 1);
+  bool subGet = client.subscribe(TOPIC_GET, 1);
 
   Serial.printf("[SUBSCRIBE] %s | %s\n", TOPIC_SET_26, sub26 ? "OK" : "GAGAL");
   Serial.printf("[SUBSCRIBE] %s | %s\n", TOPIC_SET_27, sub27 ? "OK" : "GAGAL");
+  Serial.printf("[SUBSCRIBE] %s | %s\n", TOPIC_GET, subGet ? "OK" : "GAGAL");
 
   // Beri kesempatan retained command diproses dulu, baru kirim status.
   unsigned long mulai = millis();
@@ -324,10 +348,7 @@ void connectMQTT() {
     delay(5);
   }
 
-  publishStatus(26);
-  publishStatus(27);
-  publishInfo();
-  publishHeartbeat();
+  publishSnapshot();
 }
 
 
