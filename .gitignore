@@ -1,0 +1,13 @@
+# Kredensial lokal
+mqtt-diag/secrets.h
+
+# Build & tooling
+build/
+.vscode/
+.idea/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
